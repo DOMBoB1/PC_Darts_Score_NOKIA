@@ -7,10 +7,10 @@ from time import sleep
 import cv2
 import numpy as np
 from camera_feed import CameraFeedWidget
-from PySide6 import QtCore
-from PySide6.QtCore import QThreadPool, QRunnable
+from PySide6 import QtCore 
+from PySide6.QtCore import QThreadPool, QRunnable, Signal
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
+from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QPushButton
 
 # Camera configuration
 CAMERA_NUMBER = 1  # Change this to your camera index
@@ -102,7 +102,7 @@ class CameraInitializer(QRunnable):
             print(f"Error during camera initialization: {e}")
             self.signals.initialized.emit(False)
 
-class CameraInitializerSignals(QObject):
+class CameraInitializerSignals(QtCore.QObject):
     initialized = Signal(bool)
 
 # Initialize camera in background
@@ -185,7 +185,7 @@ def detect_dart_circle_and_set_limits(img_roi):
 
 class MainWindow(QMainWindow):
     def __init__(self):
-        QMainWindow.__init__(self)
+        super().__init__()
         self.ui = Ui_DartScorer()
         self.ui.setupUi(self)  # Set up the external generated ui
         self.setWindowIcon(QIcon('icons/dart_icon.ico'))
@@ -194,28 +194,25 @@ class MainWindow(QMainWindow):
         # Create camera feed widget and place it in the layout
         # Create camera feed widget with optimized position
         self.camera_feed = CameraFeedWidget()
-        self.camera_feed.setGeometry(400, 30, 640, 480)  # Moved further to the right
+        self.camera_feed.setGeometry(540, 30, 480, 600)  # Moved further to the right
         self.camera_feed.setParent(self)
         self.camera_feed.show()
 
-        # Add Calibration Button with improved position
-        self.calibrate_button = QPushButton("Calibrate Camera", self)
-        self.calibrate_button.setGeometry(1040, 30, 120, 30)  # Moved to match new camera feed position
-        self.calibrate_button.clicked.connect(self.start_calibration)
-        self.calibrate_button.show()
+
 
         # Add a border to the camera feed for better visibility
         self.camera_feed.setStyleSheet("""
-            border: 2px solid #b78620;
-            border-radius: 5px;
-            background-color: #3a3a3a;
+            border: 0px solid #b78620;
+            border-radius: 0px;
+            background-color: transparent;
         """)
 
         # Add Calibration Button
         self.calibrate_button = QPushButton("Calibrate Camera", self)
-        self.calibrate_button.setGeometry(950, 10, 150, 40)  # Position the button
+        self.calibrate_button.setGeometry(690, 30, 100, 30)  # Position the button
         self.calibrate_button.clicked.connect(self.start_calibration)
         self.calibrate_button.show()
+        
 
         # Buttons
         self.ui.set_default_img_button.clicked.connect(lambda: UIFunctions.set_default_image(self))
@@ -226,6 +223,12 @@ class MainWindow(QMainWindow):
         self.ui.detection_sensitivity_slider.valueChanged.connect(lambda: UIFunctions.update_detection_sensitivity(self))
         self.ui.continue_button.clicked.connect(lambda: UIFunctions.start_detection_and_scoring(self))
         self.DartPositions = {}
+        template_btn = self.ui.undo_last_throw_button
+        self.calibrate_button.setFont(template_btn.font())
+        self.calibrate_button.setPalette(template_btn.palette()) 
+        self.calibrate_button.setSizePolicy(template_btn.sizePolicy())  
+        self.calibrate_button.setMinimumSize(template_btn.minimumSize())
+        self.calibrate_button.setStyleSheet(template_btn.styleSheet())       
 
         self.show()
 
