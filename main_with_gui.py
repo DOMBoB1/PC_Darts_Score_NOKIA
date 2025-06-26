@@ -3,6 +3,9 @@ import pickle
 import sys
 from statistics import mode
 from time import sleep
+import logging
+import sqlite3
+from score_db import ScoreDB
 
 import cv2
 import numpy as np
@@ -10,10 +13,10 @@ from camera_feed import CameraFeedWidget
 from PySide6 import QtCore 
 from PySide6.QtCore import QThreadPool, QRunnable, Signal, Qt
 from PySide6.QtGui import QIcon, QImage, QPixmap
-from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QPushButton, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QGroupBox, QGridLayout
+from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QPushButton, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QGroupBox, QGridLayout, QTableWidget, QTableWidgetItem, QHeaderView
 
 # Camera configuration
-CAMERA_NUMBER = 1  # Change this to your camera index
+CAMERA_NUMBER = 1  # Only use camera index 1
 
 import CalibrationWithUncertainty
 import ContourUtils
@@ -74,6 +77,12 @@ img_undist = np.zeros(target_ROI_size).astype(np.uint8)
 
 default_img = None
 
+# Set up logging to a file
+logging.basicConfig(filename='camera_errors.log', level=logging.ERROR, format='%(asctime)s %(levelname)s:%(message)s')
+
+# At the start of your main app (after global variables):
+db = ScoreDB()
+db.create_dummy_data()  # Add dummy data if the DB is empty
 
 class ManualCalibrationDialog(QDialog):
     def __init__(self, parent=None):
@@ -81,22 +90,33 @@ class ManualCalibrationDialog(QDialog):
         self.setWindowTitle("Manual Camera Calibration")
         self.setModal(True)
         self.resize(800, 600)
-        
-        # Initialize calibration parameters
-        self.fx = 1000.0  # Focal length x
-        self.fy = 1000.0  # Focal length y
-        self.cx = 960.0   # Principal point x (half of 1920)
-        self.cy = 540.0   # Principal point y (half of 1080)
-        self.k1 = 0.0     # Radial distortion coefficient 1
-        self.k2 = 0.0     # Radial distortion coefficient 2
-        self.p1 = 0.0     # Tangential distortion coefficient 1
-        self.p2 = 0.0     # Tangential distortion coefficient 2
-        
-        # Get camera instance from parent
-        self.camera_instance = parent
-        
+        self.fx = 1000.0
+        self.fy = 1000.0
+        self.cx = 960.0
+        self.cy = 540.0
+        self.k1 = 0.0
+        self.k2 = 0.0
+        self.p1 = 0.0
+        self.p2 = 0.0
+        self.camera_index = 1
+        self.preview_cap = cv2.VideoCapture(self.camera_index)
+        if not self.preview_cap.isOpened():
+            self.preview_cap = None
+            QMessageBox.critical(self, "Camera Error", "Camera 1 could not be opened for manual calibration preview.")
+            logging.error("ManualCalibrationDialog: Camera 1 could not be opened.")
         self.setup_ui()
         
+    def find_working_camera_for_preview(self):
+        for idx in [0, 1, 2, 3]:
+            cap = cv2.VideoCapture(idx)
+            if cap.isOpened():
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    self.preview_camera_index = idx
+                    return cap
+                cap.release()
+        return None
+
     def setup_ui(self):
         layout = QHBoxLayout()
         
@@ -237,36 +257,31 @@ class ManualCalibrationDialog(QDialog):
         self.preview_timer.start(100)  # Update every 100ms
     
     def update_preview(self):
-        """Update the calibration preview"""
         try:
-            if self.camera_instance and self.camera_instance.cap and self.camera_instance.cap.isOpened():
-                success, frame = self.camera_instance.cap.read()
+            if self.preview_cap and self.preview_cap.isOpened():
+                success, frame = self.preview_cap.read()
                 if success and frame is not None:
-                    # Apply current calibration parameters
                     camera_matrix, dist_coeffs = self.get_calibration_matrices()
                     undistorted = cv2.undistort(frame, camera_matrix, dist_coeffs)
-                    
-                    # Resize for display
                     height, width = undistorted.shape[:2]
                     display_width = 400
                     display_height = int(height * display_width / width)
                     display_frame = cv2.resize(undistorted, (display_width, display_height))
-                    
-                    # Convert to Qt format
                     rgb_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
                     h, w, ch = rgb_frame.shape
                     bytes_per_line = ch * w
                     qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
                     pixmap = QPixmap.fromImage(qt_image)
-                    
                     self.preview_label.setPixmap(pixmap)
                 else:
-                    self.preview_label.setText("Camera not responding")
+                    self.preview_label.setText("Camera 1 not responding")
+                    logging.error("ManualCalibrationDialog: Camera 1 did not return a frame.")
             else:
-                self.preview_label.setText("Camera not available")
+                self.preview_label.setText("Camera 1 not available")
+                logging.error("ManualCalibrationDialog: Camera 1 not available in update_preview.")
         except Exception as e:
             self.preview_label.setText(f"Preview error: {str(e)[:50]}")
-            print(f"Preview error: {e}")
+            logging.error(f"ManualCalibrationDialog: Preview error: {e}")
     
     def update_fx(self, value):
         self.fx = float(value)
@@ -320,8 +335,9 @@ class ManualCalibrationDialog(QDialog):
         self.p2_slider.setValue(int(self.p2 * 100))
     
     def closeEvent(self, event):
-        """Stop the preview timer when dialog is closed"""
         self.preview_timer.stop()
+        if self.preview_cap and self.preview_cap.isOpened():
+            self.preview_cap.release()
         super().closeEvent(event)
     
     def get_calibration_matrices(self):
@@ -476,70 +492,107 @@ class UIFunctions:
 
         # if one of the players has won the game, show the winner
         if score1.currentScore == 0:
+            winner = "Player 1"
+            db.add_session(
+                player1_name="Player 1",  # Replace with actual name if available
+                player2_name="Player 2",  # Replace with actual name if available
+                player1_score=score1.currentScore,
+                player2_score=score2.currentScore,
+                winner=winner
+            )
             self.warning("Player 1 has won the game!")
         elif score2.currentScore == 0:
+            winner = "Player 2"
+            db.add_session(
+                player1_name="Player 1",  # Replace with actual name if available
+                player2_name="Player 2",  # Replace with actual name if available
+                player1_score=score1.currentScore,
+                player2_score=score2.currentScore,
+                winner=winner
+            )
             self.warning("Player 2 has won the game!")
 
         self.ui.player1_overall.setText(str(score1.currentScore))
         self.ui.player2_overall.setText(str(score2.currentScore))
 
     def test_camera(self):
-        """Test camera functionality and provide diagnostic information"""
         try:
-            if not self.cap or not self.cap.isOpened():
-                QMessageBox.warning(self, "Camera Test", "Camera is not available or not opened.")
+            cap = cv2.VideoCapture(1)
+            if not cap.isOpened():
+                QMessageBox.critical(self, "Camera Test", "Camera 1 is not available or not opened.")
+                logging.error("Camera Test: Camera 1 is not available or not opened.")
                 return
-            
-            # Test camera reading
-            ret, frame = self.cap.read()
+            ret, frame = cap.read()
             if not ret or frame is None:
-                QMessageBox.warning(self, "Camera Test", "Camera is not responding. Cannot read frames.")
+                QMessageBox.critical(self, "Camera Test", "Camera 1 is not responding. Cannot read frames.")
+                logging.error("Camera Test: Camera 1 is not responding. Cannot read frames.")
+                cap.release()
                 return
-            
-            # Get camera properties
-            width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = self.cap.get(cv2.CAP_PROP_FPS)
-            
-            # Show test image
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
             test_window = QDialog(self)
             test_window.setWindowTitle("Camera Test - Press any key to close")
             test_window.resize(640, 480)
-            
             layout = QVBoxLayout()
-            
-            # Camera info
             info_label = QLabel(f"Camera Info:\nResolution: {width}x{height}\nFPS: {fps:.1f}\nFrame size: {frame.shape}")
             layout.addWidget(info_label)
-            
-            # Image display
             image_label = QLabel()
             image_label.setMinimumSize(400, 300)
-            
-            # Convert frame to Qt format
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb_frame.shape
             bytes_per_line = ch * w
             qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qt_image)
-            
-            # Scale to fit
             scaled_pixmap = pixmap.scaled(400, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             image_label.setPixmap(scaled_pixmap)
             image_label.setAlignment(Qt.AlignCenter)
-            
             layout.addWidget(image_label)
-            
-            # Status
-            status_label = QLabel("Camera is working correctly!")
+            status_label = QLabel("Camera 1 is working correctly!")
             status_label.setStyleSheet("color: green; font-weight: bold;")
             layout.addWidget(status_label)
-            
             test_window.setLayout(layout)
             test_window.exec()
-            
+            cap.release()
         except Exception as e:
             QMessageBox.critical(self, "Camera Test Error", f"Error testing camera: {e}")
+            logging.error(f"Camera Test Error: {e}")
+
+
+class HistoryDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Session History")
+        self.setModal(False)
+        self.resize(800, 600)
+        self.db = ScoreDB()
+        self.setup_ui()
+        self.load_history()
+
+    def setup_ui(self):
+        layout = QVBoxLayout()
+        self.table = QTableWidget()
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels([
+            "Session ID", "Timestamp", "Player 1", "Player 2",
+            "P1 Score", "P2 Score", "Winner"
+        ])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.table)
+        
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(self.load_history)
+        layout.addWidget(refresh_button)
+        
+        self.setLayout(layout)
+
+    def load_history(self):
+        history = self.db.get_all_sessions()
+        self.table.setRowCount(len(history))
+        for row_idx, row_data in enumerate(history):
+            for col_idx, col_data in enumerate(row_data):
+                item = QTableWidgetItem(str(col_data))
+                self.table.setItem(row_idx, col_idx, item)
 
 
 class MainWindow(QMainWindow, UIFunctions):
@@ -582,6 +635,12 @@ class MainWindow(QMainWindow, UIFunctions):
         self.test_camera_button.clicked.connect(self.test_camera)
         self.test_camera_button.show()
 
+        # Add View History Button
+        self.history_button = QPushButton("View History", self)
+        self.history_button.setGeometry(690, 110, 100, 30)
+        self.history_button.clicked.connect(self.show_history)
+        self.history_button.show()
+
         # Buttons - Fixed connections
         self.ui.set_default_img_button.clicked.connect(self.set_default_image)
         self.ui.start_measuring_button.clicked.connect(self.start_detection_and_scoring)
@@ -601,35 +660,28 @@ class MainWindow(QMainWindow, UIFunctions):
         self.show()
 
     def initialize_camera(self):
-        """Initialize camera and load calibration data"""
         try:
-            # Try to find a working camera
-            self.cap = self.find_working_camera()
-            if not self.cap or not self.cap.isOpened():
-                raise ValueError("Could not find a working camera")
-
-            # Try different camera settings if the default ones fail
+            self.cap = cv2.VideoCapture(1)
+            if not self.cap.isOpened():
+                logging.error("MainWindow: Could not open camera 1.")
+                raise ValueError("Could not open camera 1")
             self.cap.set(cv2.CAP_PROP_FPS, 30)
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-            
-            # Test if camera is working
             ret, test_frame = self.cap.read()
-            if not ret:
-                # Try lower resolution
+            if not ret or test_frame is None:
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 ret, test_frame = self.cap.read()
-                if not ret:
-                    raise ValueError("Camera is not responding even with lower resolution")
-
+                if not ret or test_frame is None:
+                    logging.error("MainWindow: Camera 1 is not responding even with lower resolution.")
+                    raise ValueError("Camera 1 is not responding even with lower resolution")
             if USE_CAMERA_CALIBRATION_TO_UNDISTORT:
                 if loadSavedParameters:
                     try:
                         pickle_in_MTX = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "PickleFiles", "mtx_cheap_webcam_good_target.pickle"), "rb")
                         self.meanMTX = pickle.load(pickle_in_MTX)
                         print(self.meanMTX)
-
                         pickle_in_DIST = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "PickleFiles", "dist_cheap_webcam_good_target.pickle"), "rb")
                         self.meanDIST = pickle.load(pickle_in_DIST)
                         print(self.meanDIST)
@@ -642,10 +694,9 @@ class MainWindow(QMainWindow, UIFunctions):
             print("Camera initialization completed")
         except Exception as e:
             print(f"Error during camera initialization: {e}")
-            # Set default calibration parameters if camera fails
+            logging.error(f"MainWindow: {e}")
             self.set_default_calibration_parameters()
-            QMessageBox.warning(self, "Camera Warning", 
-                              f"Camera initialization failed: {e}\n\nUsing default calibration parameters.\nYou can recalibrate manually later.")
+            QMessageBox.critical(self, "Camera Error", f"Camera 1 initialization failed: {e}\n\nUsing default calibration parameters.\nYou can recalibrate manually later.")
 
     def find_working_camera(self):
         """Try different camera indices to find a working camera"""
@@ -700,7 +751,6 @@ class MainWindow(QMainWindow, UIFunctions):
             self.perform_manual_calibration()
 
     def perform_manual_calibration(self):
-        """Perform manual calibration using the dialog"""
         try:
             dialog = ManualCalibrationDialog(self)
             if dialog.exec() == QDialog.Accepted:
@@ -789,6 +839,10 @@ class MainWindow(QMainWindow, UIFunctions):
 
     def warning(self, message="Default"):
         QMessageBox.about(self, "Congratulations !", message)
+
+    def show_history(self):
+        self.history_dialog = HistoryDialog(self)
+        self.history_dialog.show()
 
 
 class DefaultImageSetter(QRunnable):
@@ -1110,4 +1164,7 @@ if __name__ == "__main__":
             os.remove('calibration_data.json')
         if os.path.exists('calibration_data.pkl'):
             os.remove('calibration_data.pkl')
+        # On app close, close the database connection:
+        import atexit
+        atexit.register(db.close)
         sys.exit(1)

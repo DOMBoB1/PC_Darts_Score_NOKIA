@@ -113,15 +113,15 @@ def extract_roi_from_4_aruco_markers(frame, dsize=(500, 500), draw=False, use_ou
     """
     global MARKER_IDS_SAVE, MARKER_CORNERS_SAVE
     
-    # Updated ArUco API for newer OpenCV versions
+    # Use the correct ArUco dictionary creation for OpenCV version
+    if hasattr(cv2.aruco, 'getPredefinedDictionary'):
+        dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
+    else:
+        dictionary = cv2.aruco.Dictionary_get(cv2.aruco.DICT_6X6_250)
     try:
-        # Try new API first (OpenCV 4.7+)
-        dictionary = cv2.aruco.Dictionary(cv2.aruco.DICT_6X6_250)
         parameters = cv2.aruco.DetectorParameters()
         detector = cv2.aruco.ArucoDetector(dictionary, parameters)
     except AttributeError:
-        # Fallback to old API (OpenCV 4.6 and earlier)
-        dictionary = cv2.aruco.Dictionary_get(cv2.aruco.DICT_6X6_250)
         parameters = cv2.aruco.DetectorParameters_create()
 
     inner_corners = [2, 3, 0, 1]
@@ -131,18 +131,14 @@ def extract_roi_from_4_aruco_markers(frame, dsize=(500, 500), draw=False, use_ou
     # Detect the markers in the image
     if not hold_position:
         try:
-            # Try new API first
             markerCorners, markerIds, rejectedCandidates = detector.detectMarkers(frame)
         except (AttributeError, NameError):
-            # Fallback to old API
             markerCorners, markerIds, rejectedCandidates = cv2.aruco.detectMarkers(frame, dictionary, parameters=parameters)
-        
         if draw:
             frame = cv2.aruco.drawDetectedMarkers(frame, markerCorners, markerIds)
     else:
         markerCorners = MARKER_CORNERS_SAVE
         markerIds = MARKER_IDS_SAVE
-        
     if markerIds is not None:
         if all(elem in markerIds for elem in [[0], [1], [2], [3]]):
             index = np.squeeze(np.where(markerIds == 0))
@@ -156,8 +152,6 @@ def extract_roi_from_4_aruco_markers(frame, dsize=(500, 500), draw=False, use_ou
             refPt4 = np.squeeze(markerCorners[index[0]])[inner_corners[3]].astype(int)
             h2, status2 = cv2.findHomography(np.asarray([refPt1, refPt2, refPt3, refPt4]), np.asarray([[0, 0], [dsize[0], 0], [dsize[0], dsize[1]], [0, dsize[1]]]))
             warped_image2 = cv2.warpPerspective(frame, h2, dsize)
-            # Mark all the Pints
-            # save the detected markers to npy file
             MARKER_IDS_SAVE = markerIds
             MARKER_CORNERS_SAVE = markerCorners
             return warped_image2
