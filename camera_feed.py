@@ -4,9 +4,10 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget, QMainWindow
 from PySide6.QtCore import Qt, QTimer
 
 class CameraFeedWidget(QWidget):
-    def __init__(self, camera_number=1, parent=None):
+    def __init__(self, camera_number=1, parent=None, main_window=None):
         super().__init__(parent)
         self.camera_number = camera_number
+        self.main_window = main_window  # Reference to main window for calibration params and checkbox
         self.setup_ui()
         self.setup_camera()
         self.setup_timer()
@@ -42,3 +43,14 @@ class CameraFeedWidget(QWidget):
         self.timer.stop()
         self.capture.release()
         event.accept()
+
+    def restart_camera(self):
+        # Stop timer and release camera if open
+        if hasattr(self, 'timer'):
+            self.timer.stop()
+        if hasattr(self, 'capture') and self.capture is not None:
+            self.capture.release()
+            self.capture = None
+        # Reopen camera
+        self.setup_camera()
+        self.setup_timer()

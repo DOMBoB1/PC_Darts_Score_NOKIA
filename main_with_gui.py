@@ -13,7 +13,7 @@ from camera_feed import CameraFeedWidget
 from PySide6 import QtCore 
 from PySide6.QtCore import QThreadPool, QRunnable, Signal, Qt
 from PySide6.QtGui import QIcon, QImage, QPixmap
-from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QPushButton, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QGroupBox, QGridLayout, QTableWidget, QTableWidgetItem, QHeaderView
+from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QPushButton, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QGroupBox, QGridLayout, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox
 
 # Camera configuration
 CAMERA_NUMBER = 1  # Only use camera index 1
@@ -517,6 +517,10 @@ class UIFunctions:
 
     def test_camera(self):
         try:
+            # Release main camera before testing
+            if hasattr(self, 'cap') and self.cap is not None and self.cap.isOpened():
+                self.cap.release()
+                self.cap = None
             cap = cv2.VideoCapture(1)
             if not cap.isOpened():
                 QMessageBox.critical(self, "Camera Test", "Camera 1 is not available or not opened.")
@@ -554,9 +558,44 @@ class UIFunctions:
             test_window.setLayout(layout)
             test_window.exec()
             cap.release()
+            # Re-initialize main camera after test
+            self.initialize_camera()
+            # Restart camera feed in GUI
+            if hasattr(self, 'camera_feed'):
+                self.camera_feed.restart_camera()
         except Exception as e:
             QMessageBox.critical(self, "Camera Test Error", f"Error testing camera: {e}")
             logging.error(f"Camera Test Error: {e}")
+
+    def perform_manual_calibration(self):
+        try:
+            # Release main camera before calibration dialog
+            if hasattr(self, 'cap') and self.cap is not None and self.cap.isOpened():
+                self.cap.release()
+                self.cap = None
+            dialog = ManualCalibrationDialog(self)
+            if dialog.exec() == QDialog.Accepted:
+                self.meanMTX, self.meanDIST = dialog.get_calibration_matrices()
+                print("Manual calibration applied!")
+                print(f"Camera Matrix:\n{self.meanMTX}")
+                print(f"Distortion Coefficients:\n{self.meanDIST}")
+                self.save_calibration_parameters()
+                # Immediately update camera feed with new calibration
+                self.initialize_camera()  # Re-initialize camera after calibration
+                if hasattr(self, 'camera_feed'):
+                    self.camera_feed.restart_camera()
+            else:
+                print("Manual calibration cancelled. Using default parameters.")
+                self.set_default_calibration_parameters()
+                self.initialize_camera()  # Re-initialize camera after cancel
+                if hasattr(self, 'camera_feed'):
+                    self.camera_feed.restart_camera()
+        except Exception as e:
+            print(f"Manual calibration failed: {e}")
+            self.set_default_calibration_parameters()
+            self.initialize_camera()
+            if hasattr(self, 'camera_feed'):
+                self.camera_feed.restart_camera()
 
 
 class HistoryDialog(QDialog):
@@ -752,6 +791,10 @@ class MainWindow(QMainWindow, UIFunctions):
 
     def perform_manual_calibration(self):
         try:
+            # Release main camera before calibration dialog
+            if hasattr(self, 'cap') and self.cap is not None and self.cap.isOpened():
+                self.cap.release()
+                self.cap = None
             dialog = ManualCalibrationDialog(self)
             if dialog.exec() == QDialog.Accepted:
                 self.meanMTX, self.meanDIST = dialog.get_calibration_matrices()
@@ -759,12 +802,22 @@ class MainWindow(QMainWindow, UIFunctions):
                 print(f"Camera Matrix:\n{self.meanMTX}")
                 print(f"Distortion Coefficients:\n{self.meanDIST}")
                 self.save_calibration_parameters()
+                # Immediately update camera feed with new calibration
+                self.initialize_camera()  # Re-initialize camera after calibration
+                if hasattr(self, 'camera_feed'):
+                    self.camera_feed.restart_camera()
             else:
                 print("Manual calibration cancelled. Using default parameters.")
                 self.set_default_calibration_parameters()
+                self.initialize_camera()  # Re-initialize camera after cancel
+                if hasattr(self, 'camera_feed'):
+                    self.camera_feed.restart_camera()
         except Exception as e:
             print(f"Manual calibration failed: {e}")
             self.set_default_calibration_parameters()
+            self.initialize_camera()
+            if hasattr(self, 'camera_feed'):
+                self.camera_feed.restart_camera()
 
     def save_calibration_parameters(self):
         """Save calibration parameters to pickle files"""
@@ -792,46 +845,10 @@ class MainWindow(QMainWindow, UIFunctions):
                 QMessageBox.warning(self, "Camera Not Available", 
                                   "Camera is not available. Please check your camera connection and try again.")
                 return
-            
-            # Ask user if they want automatic or manual calibration
-            reply = QMessageBox.question(
-                self, 
-                "Calibration Method", 
-                "Choose calibration method:\n\nYes = Automatic calibration (requires calibration pattern)\nNo = Manual calibration (adjust parameters manually)\nCancel = Skip calibration",
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
-            )
-            
-            if reply == QMessageBox.Yes:
-                # Automatic calibration
-                try:
-                    rows = 6
-                    columns = 9
-                    square_size = 30  # Size of the calibration squares
-                    runs = 1  # Number of runs for calibration
-                    self.meanMTX, self.meanDIST, uncertaintyMTX, uncertaintyDIST = CalibrationWithUncertainty.calibrateCamera(
-                        cap=self.cap, rows=rows, columns=columns, squareSize=square_size, runs=runs
-                    )
-                    print("Automatic calibration complete. Camera matrix and distortion coefficients saved.")
-                    self.save_calibration_parameters()
-                    QMessageBox.information(self, "Calibration Complete", "Automatic camera calibration completed successfully!")
-                except Exception as e:
-                    print(f"Automatic calibration error: {e}")
-                    reply2 = QMessageBox.question(self, "Calibration Failed", 
-                                                f"Automatic calibration failed: {e}\n\nWould you like to try manual calibration?",
-                                                QMessageBox.Yes | QMessageBox.No)
-                    if reply2 == QMessageBox.Yes:
-                        self.perform_manual_calibration()
-                    else:
-                        self.set_default_calibration_parameters()
-                        
-            elif reply == QMessageBox.No:
-                # Manual calibration
-                self.perform_manual_calibration()
-                QMessageBox.information(self, "Calibration Complete", "Manual camera calibration completed!")
-            else:
-                print("Calibration cancelled by user.")
-                self.set_default_calibration_parameters()
-                
+
+            # Only allow manual calibration
+            self.perform_manual_calibration()
+            QMessageBox.information(self, "Calibration Complete", "Manual camera calibration completed!")
         except Exception as e:
             print(f"Calibration error: {e}")
             QMessageBox.critical(self, "Calibration Error", f"Calibration failed: {e}")
@@ -916,7 +933,13 @@ class DetectionAndScoring(QRunnable):
             fpsReader = FPS()
             success, img = self.camera_instance.cap.read()
             if success:
-                if USE_CAMERA_CALIBRATION_TO_UNDISTORT:
+                # Use the undistort checkbox from the main window
+                undistort = False
+                try:
+                    undistort = window.undistort_checkbox.isChecked()
+                except Exception:
+                    undistort = True
+                if undistort:
                     img_undist = utils.undistortFunction(img, self.camera_instance.meanMTX, self.camera_instance.meanDIST)
                 else:
                     img_undist = img
